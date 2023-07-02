@@ -7,10 +7,9 @@ import torch.nn.functional as F
 import torch.nn.init as init
 # conda create -n stgcn_wave python=3.8
 # conda activate stgcn_wave
-# pip install dgl-cu102 -f https://data.dgl.ai/wheels/repo.html
+# pip install dgl-cu117 -f https://data.dgl.ai/wheels/repo.html
 # pip install torch
 # pip install pandas
-# pip install sklearn
 # pip install tables
 from dgl.nn.pytorch import GraphConv
 from dgl.nn.pytorch.conv import ChebConv

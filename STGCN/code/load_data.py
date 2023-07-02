@@ -8,8 +8,10 @@ import pandas as pd
 import torch
 
 
-def load_data(file_path, len_train, len_val):
-    df = pd.read_csv(file_path, header=None).values.astype(float)
+def data_split(df, train_size=0.7, val_size=0.1):
+    num_samples, num_nodes = df.shape
+    len_val = round(num_samples * val_size)
+    len_train = round(num_samples * train_size)
     train = df[:len_train]
     val = df[len_train:len_train + len_val]
     test = df[len_train + len_val:]

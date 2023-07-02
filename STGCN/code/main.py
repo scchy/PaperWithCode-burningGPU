@@ -1,90 +1,29 @@
-import argparse
-import random
-
+# python3
+# Create date: 20230703
+# train: python main.py --batch_size=32 --epochs=10
+# ===================================================================
+from tqdm.auto import tqdm
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 import torch
 import torch.nn as nn
-from load_data import *
+from load_data import load_data, data_transform
 from model import *
-from sensors2graph import *
+from sensors2graph import get_adjacency_matrix
 from sklearn.preprocessing import StandardScaler
-from utils import *
-
+from utils import evaluate_model, evaluate_metric, args_func, device
 import dgl
 
-parser = argparse.ArgumentParser(description="STGCN_WAVE")
-parser.add_argument("--lr", default=0.001, type=float, help="learning rate")
-parser.add_argument("--disablecuda", action="store_true", help="Disable CUDA")
-parser.add_argument(
-    "--batch_size",
-    type=int,
-    default=50,
-    help="batch size for training and validation (default: 50)",
-)
-parser.add_argument(
-    "--epochs", type=int, default=50, help="epochs for training  (default: 50)"
-)
-parser.add_argument(
-    "--num_layers", type=int, default=9, help="number of layers"
-)
-parser.add_argument("--window", type=int, default=144, help="window length")
-parser.add_argument(
-    "--sensorsfilepath",
-    type=str,
-    default="./data/sensor_graph/graph_sensor_ids.txt",
-    help="sensors file path",
-)
-parser.add_argument(
-    "--disfilepath",
-    type=str,
-    default="./data/sensor_graph/distances_la_2012.csv",
-    help="distance file path",
-)
-parser.add_argument(
-    "--tsfilepath", type=str, default="./data/metr-la.h5", help="ts file path"
-)
-parser.add_argument(
-    "--savemodelpath",
-    type=str,
-    default="stgcnwavemodel.pt",
-    help="save model path",
-)
-parser.add_argument(
-    "--pred_len",
-    type=int,
-    default=5,
-    help="how many steps away we want to predict",
-)
-parser.add_argument(
-    "--control_str",
-    type=str,
-    default="TNTSTNTST",
-    help="model strcture controller, T: Temporal Layer, S: Spatio Layer, N: Norm Layer",
-)
-parser.add_argument(
-    "--channels",
-    type=int,
-    nargs="+",
-    default=[1, 16, 32, 64, 32, 128],
-    help="model strcture controller, T: Temporal Layer, S: Spatio Layer, N: Norm Layer",
-)
-args = parser.parse_args()
 
-device = (
-    torch.device("cuda")
-    if torch.cuda.is_available() and not args.disablecuda
-    else torch.device("cpu")
-)
-
+args = args_func()
 with open(args.sensorsfilepath) as f:
     sensor_ids = f.read().strip().split(",")
 
 distance_df = pd.read_csv(args.disfilepath, dtype={"from": "str", "to": "str"})
-
 adj_mx = get_adjacency_matrix(distance_df, sensor_ids)
 sp_mx = sp.coo_matrix(adj_mx)
+# use dgl generate graph
 G = dgl.from_scipy(sp_mx)
 
 
@@ -93,9 +32,7 @@ num_samples, num_nodes = df.shape
 
 tsdata = df.to_numpy()
 
-
 n_his = args.window
-
 save_path = args.savemodelpath
 
 
@@ -105,11 +42,9 @@ blocks = args.channels
 # blocks = [1, 16, 32, 64, 32, 128]
 drop_prob = 0
 num_layers = args.num_layers
-
 batch_size = args.batch_size
 epochs = args.epochs
 lr = args.lr
-
 
 W = adj_mx
 len_val = round(num_samples * 0.1)
@@ -142,40 +77,37 @@ model = STGCN_WAVE(
     blocks, n_his, n_route, G, drop_prob, num_layers, device, args.control_str
 ).to(device)
 optimizer = torch.optim.RMSprop(model.parameters(), lr=lr)
-
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.7)
 
 min_val_loss = np.inf
 for epoch in range(1, epochs + 1):
     l_sum, n = 0.0, 0
     model.train()
-    for x, y in train_iter:
+    tq_bar = tqdm(train_iter)
+    tq_bar.set_description(f"[ Train | {epoch:03d} / {epochs:03d} ]")
+    for x, y in tq_bar:
+        x, y = x.to(device), y.to(device)
         y_pred = model(x).view(len(x), -1)
         l = loss(y_pred, y)
         optimizer.zero_grad()
         l.backward()
         optimizer.step()
-        l_sum += l.item() * y.shape[0]
+        l_sum += l.cpu().item() * y.shape[0]
         n += y.shape[0]
+        tq_bar.set_postfix({'loss': "{:.5f}".format(l_sum / (n+0.0001))})
+
     scheduler.step()
     val_loss = evaluate_model(model, loss, val_iter)
     if val_loss < min_val_loss:
         min_val_loss = val_loss
         torch.save(model.state_dict(), save_path)
-    print(
-        "epoch",
-        epoch,
-        ", train loss:",
-        l_sum / n,
-        ", validation loss:",
-        val_loss,
-    )
+    print(f"epoch={epoch}, train loss:{l_sum / n:.5f}, validation loss:{val_loss:.5f}")
 
 
 best_model = STGCN_WAVE(
     blocks, n_his, n_route, G, drop_prob, num_layers, device, args.control_str
 ).to(device)
-best_model.load_state_dict(torch.load(save_path))
+best_model.load_state_dict(torch.load(save_path, map_location='cpu'))
 
 
 l = evaluate_model(best_model, loss, test_iter)

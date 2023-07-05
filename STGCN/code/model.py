@@ -13,6 +13,8 @@ import torch.nn.init as init
 # pip install tables
 from dgl.nn.pytorch import GraphConv
 from dgl.nn.pytorch.conv import ChebConv
+from typing import List
+import dgl
 
 
 class TemporalConvLayer(nn.Module):
@@ -61,33 +63,52 @@ class SpatioConvLayer(nn.Module):
 
 
 class FullyConvLayer(nn.Module):
-    def __init__(self, c):
+    def __init__(self, c, n):
         super(FullyConvLayer, self).__init__()
-        self.conv = nn.Conv2d(c, 1, 1)
+        self.conv = nn.Conv2d(c, n, 1)
 
     def forward(self, x):
         return self.conv(x)
 
 
 class OutputLayer(nn.Module):
-    def __init__(self, c, T, n):
+    def __init__(self, c, T, n, pred_n):
         super(OutputLayer, self).__init__()
         self.tconv1 = nn.Conv2d(c, c, (T, 1), 1, dilation=1, padding=(0, 0))
         self.ln = nn.LayerNorm([n, c])
         self.tconv2 = nn.Conv2d(c, c, (1, 1), 1, dilation=1, padding=(0, 0))
-        self.fc = FullyConvLayer(c)
+        self.fc = FullyConvLayer(c, pred_n)
 
     def forward(self, x):
         x_t1 = self.tconv1(x)
         x_ln = self.ln(x_t1.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
         x_t2 = self.tconv2(x_ln)
-        return self.fc(x_t2)
+        return self.fc(x_t2).squeeze(2)
 
 
 class STGCN_WAVE(nn.Module):
-    def __init__(
-        self, c, T, n, Lk, p, num_layers, device, control_str="TNTSTNTST"
+    def __init__(self, 
+        c: List, 
+        T: int, 
+        pred_n: int,
+        n: int,
+        Lk: dgl.DGLHeteroGraph,
+        p: float, 
+        device: torch.device, 
+        control_str: str="TNTSTNTST"
     ):
+        """STGCN_WAVE
+
+        Args:
+            c (List): blocks will defined model size , len(c) == len(args.control_str.replace('N', '')) - 1
+            T (int):  input time series length; v_{t-M+1},...,v_{t}
+            pred_n (int):  output time series length; \hat{v_{t+1}},...,\hat{v_{t+H}}
+            n (int): num of nodes
+            Lk (dgl.DGLHeteroGraph):  graph matrix
+            p (float): drop out rate
+            device (torch.device): train model in which device
+            control_str (str, optional): model architecture. Defaults to "TNTSTNTST".
+        """
         super(STGCN_WAVE, self).__init__()
         self.control_str = control_str  # model structure controller
         self.num_layers = len(control_str)
@@ -106,7 +127,7 @@ class STGCN_WAVE(nn.Module):
                 self.layers.append(SpatioConvLayer(c[cnt], Lk))
             if i_layer == "N":  # Norm Layer
                 self.layers.append(nn.LayerNorm([n, c[cnt]]))
-        self.output = OutputLayer(c[cnt], T + 1 - 2 ** (diapower), n)
+        self.output = OutputLayer(c[cnt], T + 1 - 2 ** (diapower), n, pred_n)
         for layer in self.layers:
             layer = layer.to(device)
 

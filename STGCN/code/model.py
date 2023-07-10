@@ -1,65 +1,168 @@
-import math
 import sys
 import os
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
-# conda create -n stgcn_wave python=3.8
-# conda activate stgcn_wave
-# pip install dgl-cu117 -f https://data.dgl.ai/wheels/repo.html
-# pip install torch
-# pip install pandas
-# pip install tables
-from dgl.nn.pytorch import GraphConv
-from dgl.nn.pytorch.conv import ChebConv
 from typing import List
-import dgl
 
-
-class TemporalConvLayer(nn.Module):
-    """Temporal convolution layer.
-
-    arguments
-    ---------
-    c_in : int
-        The number of input channels (features)
-    c_out : int
-        The number of output channels (features)
-    dia : int
-        The dilation size
-    """
-
-    def __init__(self, c_in, c_out, dia=1):
-        super(TemporalConvLayer, self).__init__()
-        self.c_out = c_out
+class TCN(nn.Module):
+    def __init__(self, c_in: int, c_out: int, dia: int=1):
+        """TemporalConvLayer
+        input_dim:  (batch_size, 1, his_time_seires_len, node_num)
+        sample:     [b, 1, 144, 207]
+        Args:
+            c_in (int): channel in
+            c_out (_type_): channel out
+            dia (int, optional): The dilation size. Defaults to 1.
+        """
+        super(TCN, self).__init__()
+        self.c_out = c_out * 2
         self.c_in = c_in
         self.conv = nn.Conv2d(
-            c_in, c_out, (2, 1), 1, dilation=dia, padding=(0, 0)
+            c_in, self.c_out, (2, 1), 1, padding=(0, 0), dilation=dia
         )
 
     def forward(self, x):
-        return torch.relu(self.conv(x))
+        # [batch, channel, his_n, node_num] 
+        #   kernel only filter on TimeSeries dim  his_n
+        c = self.c_out//2
+        out = self.conv(x)
+        if len(x.shape) == 3: # channel, his_n, node_num
+            P = out[:c, :, :]
+            Q = out[c:, :, :]
+        else:
+            P = out[:, :c, :, :]
+            Q = out[:, c:, :, :]
+        return P * torch.sigmoid(Q)
 
 
-class SpatioConvLayer(nn.Module):
-    def __init__(self, c, Lk):  # c : hidden dimension Lk: graph matrix
-        super(SpatioConvLayer, self).__init__()
-        self.g = Lk
-        self.gc = GraphConv(c, c, activation=F.relu)
-        # self.gc = ChebConv(c, c, 3)
+
+class SCN_Cheb(nn.Module):
+    def __init__(self, c, A, K=2):
+        """spation cov layer
+        Args:
+            c (int): hidden dimension
+            A (adj matrix): adj matrix
+        """
+        super(SCN_Cheb, self).__init__()
+        D_ = torch.diag(torch.pow(A.sum(axis=1), -0.5))
+        self.K = K
+        self.DAD = D_ @ A @ D_
+        # based on the conception of spectral graph convolution
+        # https://github.com/tkipf/gcn
+        # reference paper: 
+        #   [SEMI-SUPERVISED CLASSIFICATION WITH GRAPH CONVOLUTIONAL NETWORKS](https://arxiv.org/pdf/1609.02907.pdf)
+        #   [Convolutional Neural Networks on Graphs with Fast Localized Spectral Filtering](https://arxiv.org/pdf/1606.09375.pdf)
+        # reference blogs:
+        #   [Knowing Your Neighbours: Machine Learning on Graphs](https://medium.com/stellargraph/knowing-your-neighbours-machine-learning-on-graphs-9b7c3d0d5896)
+        self.SCN_conv_0 = nn.Conv2d(
+            c, c, (2, 1), 1, padding=(0, 0)
+        )
+        self.SCN_conv_1 = nn.Conv2d(
+            K * c, c, (2, 1), 1, padding=(0, 0)
+        )
 
     def init(self):
-        stdv = 1.0 / math.sqrt(self.W.weight.size(1))
+        stdv = 1.0 / np.sqrt(self.W.weight.size(1))
         self.W.weight.data.uniform_(-stdv, stdv)
 
     def forward(self, x):
-        x = x.transpose(0, 3)
+        # For a signal with Ci channels M n C
+        # [batch, channel, his_n, node_num] -> [batch, node_num, his_n, channel] -> [batch, his_n, node_num, channel] 
+        x = self.SCN_conv_0(x)
         x = x.transpose(1, 3)
-        output = self.gc(self.g, x)
+        x = x.transpose(1, 2)
+        output = self.m_unnlpp(x)
+        # return dim
+        output = output.transpose(1, 2)
         output = output.transpose(1, 3)
-        output = output.transpose(0, 3)
-        return torch.relu(output)
+        output = self.SCN_conv_1(output)
+        return output 
+
+    def m_unnlpp(self, feat):
+        K = self.K
+        X_0 = feat
+        Xt = [X_0]
+        # X_1(f)
+        if K > 1:
+            h = self.DAD @ X_0
+            X_1 = -h
+            # Append X_1 to Xt
+            Xt.append(X_1)
+
+        # Xi(x), i = 2...k
+        for _ in range(2, K):
+            print('a')
+            h = self.DAD @ X_1
+            X_i = -2 * 1 * h - X_0
+            # Add X_1 to Xt
+            Xt.append(X_i)
+            X_1, X_0 = X_i, X_1
+
+        # Create the concatenation
+        Xt = torch.cat(Xt, dim=-1)
+        return Xt
+
+
+class SCN_Cheb_linear(nn.Module):
+    def __init__(self, c, A, K=2):
+        """spation cov layer
+        Args:
+            c (int): hidden dimension
+            A (adj matrix): adj matrix
+        """
+        super(SCN_Cheb_linear, self).__init__()
+        D_ = torch.diag(torch.pow(A.sum(axis=1), -0.5))
+        self.K = K
+        self.DAD = D_ @ A @ D_
+        # based on the conception of spectral graph convolution
+        # https://github.com/tkipf/gcn
+        # reference paper: 
+        #   [SEMI-SUPERVISED CLASSIFICATION WITH GRAPH CONVOLUTIONAL NETWORKS](https://arxiv.org/pdf/1609.02907.pdf)
+        #   [Convolutional Neural Networks on Graphs with Fast Localized Spectral Filtering](https://arxiv.org/pdf/1606.09375.pdf)
+        # reference blogs:
+        #   [Knowing Your Neighbours: Machine Learning on Graphs](https://medium.com/stellargraph/knowing-your-neighbours-machine-learning-on-graphs-9b7c3d0d5896)
+        self.weight = nn.Parameter(torch.empty((K * c, c)))
+        self.bias = nn.Parameter(torch.empty(c))
+        stdv = 1.0 / np.sqrt(self.weight.size(1))
+        self.weight.data.uniform_(-stdv, stdv)
+
+    def forward(self, x):
+        # For a signal with Ci channels M n C
+        # [batch, channel, his_n, node_num] -> [batch, node_num, his_n, channel] -> [batch, his_n, node_num, channel] 
+        x = x.transpose(1, 3)
+        x = x.transpose(1, 2)
+        output = self.m_unnlpp(x)
+        output = output @ self.weight + self.bias
+        # return dim
+        output = output.transpose(1, 2)
+        output = output.transpose(1, 3)
+        return output 
+
+    def m_unnlpp(self, feat):
+        K = self.K
+        X_0 = feat
+        Xt = [X_0]
+        # X_1(f)
+        if K > 1:
+            h = self.DAD @ X_0
+            X_1 = -h
+            # Append X_1 to Xt
+            Xt.append(X_1)
+
+        # Xi(x), i = 2...k
+        for _ in range(2, K):
+            h = self.DAD @ X_1
+            X_i = -2 * 1 * h - X_0
+            # Add X_1 to Xt
+            Xt.append(X_i)
+            X_1, X_0 = X_i, X_1
+
+        # Create the concatenation
+        Xt = torch.cat(Xt, dim=-1)
+        return Xt
 
 
 class FullyConvLayer(nn.Module):
@@ -74,6 +177,7 @@ class FullyConvLayer(nn.Module):
 class OutputLayer(nn.Module):
     def __init__(self, c, T, n, pred_n):
         super(OutputLayer, self).__init__()
+        # [batch, channel, his_n, node_num] conv his_n -> 1
         self.tconv1 = nn.Conv2d(c, c, (T, 1), 1, dilation=1, padding=(0, 0))
         self.ln = nn.LayerNorm([n, c])
         self.tconv2 = nn.Conv2d(c, c, (1, 1), 1, dilation=1, padding=(0, 0))
@@ -92,8 +196,8 @@ class STGCN_WAVE(nn.Module):
         T: int, 
         pred_n: int,
         n: int,
-        Lk: dgl.DGLHeteroGraph,
-        p: float, 
+        Lk: torch.Tensor,
+        K: int, 
         device: torch.device, 
         control_str: str="TNTSTNTST"
     ):
@@ -105,7 +209,7 @@ class STGCN_WAVE(nn.Module):
             pred_n (int):  output time series length; \hat{v_{t+1}},...,\hat{v_{t+H}}
             n (int): num of nodes
             Lk (dgl.DGLHeteroGraph):  graph matrix
-            p (float): drop out rate
+            k (int):  SCN_Cheb k 
             device (torch.device): train model in which device
             control_str (str, optional): model architecture. Defaults to "TNTSTNTST".
         """
@@ -115,19 +219,22 @@ class STGCN_WAVE(nn.Module):
         self.layers = nn.ModuleList([])
         cnt = 0
         diapower = 0
+        s_cnt = 0
         for i in range(self.num_layers):
             i_layer = control_str[i]
             if i_layer == "T":  # Temporal Layer
                 self.layers.append(
-                    TemporalConvLayer(c[cnt], c[cnt + 1], dia=2**diapower)
+                    TCN(c[cnt], c[cnt + 1], dia=2**diapower)
                 )
                 diapower += 1
                 cnt += 1
             if i_layer == "S":  # Spatio Layer
-                self.layers.append(SpatioConvLayer(c[cnt], Lk))
+                self.layers.append(SCN_Cheb(c[cnt], Lk, K=K))
+                s_cnt += 2
             if i_layer == "N":  # Norm Layer
                 self.layers.append(nn.LayerNorm([n, c[cnt]]))
-        self.output = OutputLayer(c[cnt], T + 1 - 2 ** (diapower), n, pred_n)
+        print(T + 1 - 2 ** (diapower) - s_cnt)
+        self.output = OutputLayer(c[cnt], T + 1 - 2 ** (diapower) - s_cnt, n, pred_n)
         for layer in self.layers:
             layer = layer.to(device)
 

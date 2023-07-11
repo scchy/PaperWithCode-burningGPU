@@ -39,68 +39,55 @@ class TCN(nn.Module):
 
 
 
-class SCN_Cheb(nn.Module):
+class STCN_Cheb(nn.Module):
     def __init__(self, c, A, K=2):
         """spation cov layer
         Args:
             c (int): hidden dimension
             A (adj matrix): adj matrix
         """
-        super(SCN_Cheb, self).__init__()
-        D_ = torch.diag(torch.pow(A.sum(axis=1), -0.5))
+        super(STCN_Cheb, self).__init__()
         self.K = K
-        self.DAD = D_ @ A @ D_
-        # based on the conception of spectral graph convolution
-        # https://github.com/tkipf/gcn
-        # reference paper: 
-        #   [SEMI-SUPERVISED CLASSIFICATION WITH GRAPH CONVOLUTIONAL NETWORKS](https://arxiv.org/pdf/1609.02907.pdf)
-        #   [Convolutional Neural Networks on Graphs with Fast Localized Spectral Filtering](https://arxiv.org/pdf/1606.09375.pdf)
-        # reference blogs:
-        #   [Knowing Your Neighbours: Machine Learning on Graphs](https://medium.com/stellargraph/knowing-your-neighbours-machine-learning-on-graphs-9b7c3d0d5896)
-        self.SCN_conv_0 = nn.Conv2d(
-            c, c, (2, 1), 1, padding=(0, 0)
-        )
-        self.SCN_conv_1 = nn.Conv2d(
-            K * c, c, (2, 1), 1, padding=(0, 0)
-        )
+        self.lambda_max = 2
+        self.tilde_L = self.get_tilde_L(A)
+        self.weight = nn.Parameter(torch.empty((K * c, c)))
+        self.bias = nn.Parameter(torch.empty(c))
+        stdv = 1.0 / np.sqrt(self.weight.size(1))
+        self.weight.data.uniform_(-stdv, stdv)
 
-    def init(self):
-        stdv = 1.0 / np.sqrt(self.W.weight.size(1))
-        self.W.weight.data.uniform_(-stdv, stdv)
-
+    def get_tilde_L(self, A):
+        I = torch.diag(torch.Tensor([1] * A.size(0))).float().to(A.device)
+        tilde_A = A + I 
+        tilde_D = torch.diag(torch.pow(tilde_A.sum(axis=1), -0.5))
+        return 2 / self.lambda_max * (I - tilde_D @ tilde_A @ tilde_D) - I
+    
     def forward(self, x):
         # For a signal with Ci channels M n C
         # [batch, channel, his_n, node_num] -> [batch, node_num, his_n, channel] -> [batch, his_n, node_num, channel] 
-        x = self.SCN_conv_0(x)
         x = x.transpose(1, 3)
         x = x.transpose(1, 2)
         output = self.m_unnlpp(x)
+        output = output @ self.weight + self.bias
         # return dim
         output = output.transpose(1, 2)
         output = output.transpose(1, 3)
-        output = self.SCN_conv_1(output)
-        return output 
-
+        return torch.relu(output) 
+    
     def m_unnlpp(self, feat):
         K = self.K
         X_0 = feat
         Xt = [X_0]
         # X_1(f)
         if K > 1:
-            h = self.DAD @ X_0
-            X_1 = -h
+            X_1 = self.tilde_L @ X_0
             # Append X_1 to Xt
             Xt.append(X_1)
 
-        # Xi(x), i = 2...k
         for _ in range(2, K):
-            print('a')
-            h = self.DAD @ X_1
-            X_i = -2 * 1 * h - X_0
+            X_i =  2 * self.tilde_L @ X_1 - X_0
             # Add X_1 to Xt
             Xt.append(X_i)
             X_1, X_0 = X_i, X_1
-
         # Create the concatenation
         Xt = torch.cat(Xt, dim=-1)
         return Xt
@@ -219,7 +206,6 @@ class STGCN_WAVE(nn.Module):
         self.layers = nn.ModuleList([])
         cnt = 0
         diapower = 0
-        s_cnt = 0
         for i in range(self.num_layers):
             i_layer = control_str[i]
             if i_layer == "T":  # Temporal Layer
@@ -229,12 +215,11 @@ class STGCN_WAVE(nn.Module):
                 diapower += 1
                 cnt += 1
             if i_layer == "S":  # Spatio Layer
-                self.layers.append(SCN_Cheb(c[cnt], Lk, K=K))
-                s_cnt += 2
+                self.layers.append(STCN_Cheb(c[cnt], Lk, K=K))
             if i_layer == "N":  # Norm Layer
                 self.layers.append(nn.LayerNorm([n, c[cnt]]))
-        print(T + 1 - 2 ** (diapower) - s_cnt)
-        self.output = OutputLayer(c[cnt], T + 1 - 2 ** (diapower) - s_cnt, n, pred_n)
+
+        self.output = OutputLayer(c[cnt], T + 1 - 2 ** (diapower), n, pred_n)
         for layer in self.layers:
             layer = layer.to(device)
 

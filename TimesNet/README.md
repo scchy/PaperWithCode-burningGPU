@@ -45,7 +45,7 @@ the original 1D structure of time series can only present the variations among a
 To tackle this limitation, we explore the two-dimension structure for temporal variations, which can explicitly present variations within and between periods, thereby with more advantages in representation capability and benefiting the subsequent representation learning.
 
 $X_{1D} \in \mathcal{R}^{T \times C}$, discover periods first. We analyze the time series in the frequency domain by FFT. 
-$$\bf{A} = Avg(Amp(FFT(X_{1D}))), \{f_1, f_2, ..., f_k\}=\underset{f_* \in \{1, ..., \lceil \frac{T}{2}\rceil\}}{arg\ Topk} (A), p_i = \lceil \frac{T}{f_i}\rceil, i \in \{1, .., k\} \space(2) (1)$$
+$$\bf{A} = Avg(Amp(FFT(X_{1D}))), \{f_1, f_2, ..., f_k\}=\underset{f_* \in \{1, ..., \lceil \frac{T}{2}\rceil\}}{arg\ Topk} (A), p_i = \lceil \frac{T}{f_i}\rceil, i \in \{1, .., k\} \ (1)$$
 
 summarize Equation 1 as follows:
 $$A, \{f_1, ..., f_k\}, \{p_1, ..., p_k\}=Period(X_{1D}) \ \ \ (2)$$

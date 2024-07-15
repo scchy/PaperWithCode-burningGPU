@@ -307,7 +307,12 @@ class Dataset_sp(Dataset):
         return self.scaler.inverse_transform(data)
 
 
-def train(model, train_loader, vali_loader, test_loader, cfg, invert_tf=None):
+def quick_fft_loss_fn(outputs, batch_y):
+    loss_auxi = torch.fft.fft(outputs, dim=1) - torch.fft.fft(batch_y, dim=1)
+    return (loss_auxi.abs()**2).mean()
+
+
+def train(model, train_loader, vali_loader, test_loader, cfg, invert_tf=None, fft_loss_weight=None):        
     device = cfg.device
     model = model.to(device)
     path = cfg.save_dir
@@ -320,7 +325,7 @@ def train(model, train_loader, vali_loader, test_loader, cfg, invert_tf=None):
     model_optim = optim.Adam(model.parameters(), lr=cfg.learning_rate)
     criterion = nn.MSELoss()
     test_best_loss = np.inf
-    x_mark_dec_flag = cfg.x_mark_dec_flag if hasattr(cfg, "x_mark_dec_flag") else  None
+    x_mark_dec_flag = cfg.x_mark_dec_flag if hasattr(cfg, "x_mark_dec_flag") else  False
     ep_bar = tqdm(range(cfg.num_epochs))
     for epoch in ep_bar:
         ep_bar.set_description(f'[ {str(epoch+1).zfill(3)} /{str(cfg.num_epochs).zfill(3)} ]')
@@ -341,6 +346,8 @@ def train(model, train_loader, vali_loader, test_loader, cfg, invert_tf=None):
             outputs = outputs[:, -cfg.pred_len:, :]
             batch_y = batch_y[:, -cfg.pred_len:, :].to(device)
             loss = criterion(outputs, batch_y)
+            if fft_loss_weight is not None:
+                loss = fft_loss_weight * quick_fft_loss_fn(outputs, batch_y) + (1 - fft_loss_weight) * loss
             if invert_tf is not None:
                 np_outputs = np.stack([invert_tf(i) for i in outputs[:, -cfg.pred_len:, :].detach().cpu().numpy()])
                 np_batch_y = np.stack([invert_tf(i) for i in batch_y[:, -cfg.pred_len:, :].detach().cpu().numpy()])

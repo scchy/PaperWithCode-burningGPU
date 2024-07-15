@@ -38,7 +38,10 @@ class iTransformer(nn.Module):
             ],
             norm_layer=nn.LayerNorm(cfg.d_model, cfg.n_heads)
         )
-        
+        self.x_mark_dec_flag = cfg.x_mark_dec_flag if hasattr(cfg, "x_mark_dec_flag") else  None
+        # x_mark_dec
+        if self.x_mark_dec_flag is not None:
+            self.x_mark_dec_embd = nn.Linear(self.pred_len, cfg.d_model)
         # Decoder:
         if self.task_name in ['long_term_forecast', 'short_term_forecast']:
             self.projection = nn.Linear(cfg.d_model, cfg.pred_len, bias=True)
@@ -75,7 +78,14 @@ class iTransformer(nn.Module):
         enc_out, attns = self.encoder(enc_out, attn_mask=None)
         
         # Out [B N E] -> [B N pred_len] -> [B pred_len N]
-        dec_out = self.projection(enc_out).permute(0, 2, 1)[:, :, :N]
+        if self.x_mark_dec_flag is not None and x_mark_dec is not None:
+            # [B pred_len date_var_N] -> ([B date_var_N pred_len]) -> [B date_var_N E] -> [B 1 E]
+            enc_extra = self.x_mark_dec_embd(x_mark_dec.permute(0, 2, 1)).mean(dim=1, keepdim=True)
+            # Out [B N E] -> [B N pred_len] -> [B pred_len N]
+            dec_out = self.projection(enc_out + enc_extra).permute(0, 2, 1)[:, :, :N]
+        else:
+            # Out [B N E] -> [B N pred_len] -> [B pred_len N]
+            dec_out = self.projection(enc_out).permute(0, 2, 1)[:, :, :N]
 
         if self.use_norm:
             # De-Normalization from Non-stationary Transformer

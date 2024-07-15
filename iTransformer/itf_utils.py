@@ -226,6 +226,87 @@ class Dataset_hour(Dataset):
         return self.scaler.inverse_transform(data)
 
 
+class Dataset_sp(Dataset):
+    def __init__(
+            self,
+            base_df,
+            target_cols,
+            flag='train',
+            seq_len=4 * 7 * 24,
+            pred_len=24,
+            scale=True,
+            return_dt=False,
+            border1s=None,
+            border2s=None
+    ):
+        self.return_dt = return_dt
+        self.seq_len = seq_len
+        self.pred_len = pred_len
+        assert flag in ['train', 'val', 'test']
+        type_map = {'train': 0, 'val': 1, 'test': 2}
+        self.set_type = type_map[flag]
+        self.border1s = border1s
+        self.border2s = border2s
+        self.target_cols = target_cols
+        self.scale = scale
+        self.base_df = base_df
+        self.__prepare_data()
+
+    def __prepare_data(self):
+        self.scaler = StandardScaler()
+        # 0 day_x, 1 weekday_x, 2  hour_x
+        date_series = pd.to_datetime(self.base_df['date'])
+        date_emb = np.ones((len(date_series), 4), dtype=np.float32)
+        date_emb[:, 0] = (date_series.dt.day - 1) / 30.0 - 0.5
+        date_emb[:, 1] = date_series.dt.dayofweek / 6.0 - 0.5
+        date_emb[:, 2] = date_series.dt.hour / 23.0 - 0.5
+        date_emb[:, 3] = (date_series.dt.month - 1) / 11.0 - 0.5
+
+        df_raw = self.base_df
+        base_ = 30 * 24
+        border1s = [0, 8 * base_ - self.seq_len, (8 + 3) * base_ - self.seq_len] if self.border1s is None else self.border1s
+        border2s = [8 * base_, (8 + 3) * base_, (8 + 6) * base_] if self.border2s is None else self.border2s
+
+        border1 = border1s[self.set_type]
+        border2 = border2s[self.set_type]
+        print(f"set_type({self.set_type}): {border1} -> {border2} len={border2 - border1 - self.seq_len - self.pred_len + 1}")
+        df_data = df_raw[self.target_cols]
+        if self.scale:
+            train_data = df_data[border1s[0]:border2s[0]]
+            self.scaler.fit(train_data.values)
+            data = self.scaler.transform(df_data.values)
+        else:
+            data = df_data.values
+
+        self.data_x = data[border1:border2, :]
+        self.data_y = data[border1:border2, :]
+        self.date_emb = date_emb[border1:border2, :]
+        self.date_org = date_series.dt.strftime('%Y%m%d%H').map(int).values[border1:border2]
+        print(f"df_raw.shape={df_raw.shape} data.shape={data.shape} self.data_x.shape={self.data_x.shape}")
+
+    def __getitem__(self, index):
+        s_begin = index
+        s_end = s_begin + self.seq_len
+        pred_end = s_end + self.pred_len
+
+        seq_x = self.data_x[s_begin:s_end]
+        seq_y = self.data_y[s_end:pred_end]
+        seq_x_mark = self.date_emb[s_begin:s_end]
+        seq_y_mark = self.date_emb[s_end:pred_end]
+
+        if self.return_dt:
+            seq_x_dt = self.date_org[s_begin:s_end]
+            seq_y_dt = self.date_org[s_end:pred_end]
+            return seq_x, seq_y, seq_x_mark, seq_y_mark, seq_x_dt, seq_y_dt
+        return seq_x, seq_y, seq_x_mark, seq_y_mark
+
+    def __len__(self):
+        return len(self.data_x) - self.seq_len - self.pred_len + 1
+
+    def inverse_transform(self, data):
+        return self.scaler.inverse_transform(data)
+
+
 def train(model, train_loader, vali_loader, test_loader, cfg, invert_tf=None):
     device = cfg.device
     model = model.to(device)
@@ -239,7 +320,7 @@ def train(model, train_loader, vali_loader, test_loader, cfg, invert_tf=None):
     model_optim = optim.Adam(model.parameters(), lr=cfg.learning_rate)
     criterion = nn.MSELoss()
     test_best_loss = np.inf
-
+    x_mark_dec_flag = cfg.x_mark_dec_flag if hasattr(cfg, "x_mark_dec_flag") else  None
     ep_bar = tqdm(range(cfg.num_epochs))
     for epoch in ep_bar:
         ep_bar.set_description(f'[ {str(epoch+1).zfill(3)} /{str(cfg.num_epochs).zfill(3)} ]')
@@ -256,7 +337,7 @@ def train(model, train_loader, vali_loader, test_loader, cfg, invert_tf=None):
             seq_x_mark = seq_x_mark.float().to(device)
             seq_y_mark = seq_y_mark.float().to(device)
 
-            outputs = model(batch_x, seq_x_mark)
+            outputs = model(batch_x, seq_x_mark, x_mark_dec=seq_y_mark if x_mark_dec_flag else None)
             outputs = outputs[:, -cfg.pred_len:, :]
             batch_y = batch_y[:, -cfg.pred_len:, :].to(device)
             loss = criterion(outputs, batch_y)
